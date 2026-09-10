@@ -1,4 +1,4 @@
-ieee-fraud-detection/
+# Python / notebook cache
 __pycache__/
 .ipynb_checkpoints/
 .venv/
