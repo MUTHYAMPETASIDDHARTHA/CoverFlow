@@ -1,0 +1,12 @@
+{
+    "roc_auc": 0.9475484740370078,
+    "class_conditional_coverage": 0.9518519772863255,
+    "class_conditional_mean_set_size": 1.2964518350436325,
+    "class_conditional_workload": 29.64518350436324,
+    "amount_segment_coverage": 0.9517503753626624,
+    "amount_segment_mean_set_size": 1.315756200539619,
+    "amount_segment_workload": 31.575620053961913,
+    "device_segment_coverage": 0.9524390106230456,
+    "device_segment_mean_set_size": 1.3696052200810558,
+    "device_segment_workload": 36.96052200810557
+}
