@@ -110,6 +110,206 @@ demo_df = load_demo_data()
 # =========================================================
 # HELPER FUNCTIONS
 # =========================================================
+
+def get_calibration_threshold(mode, amount_segment, device, class_id):
+
+    if mode == "Class-Conditional":
+        qhat = qhat_class[class_id]
+
+    elif mode == "Amount Segment":
+        qhat = amount_qhat[(amount_segment, class_id)]
+
+    else:
+        if device not in ["Unknown", "desktop", "mobile"]:
+            device = "Unknown"
+
+        key = (device, class_id)
+
+        if key not in device_qhat:
+            key = ("Unknown", class_id)
+
+        if key not in device_qhat:
+            raise ValueError(
+                f"No device calibration threshold available for {device}, "
+                f"class {class_id}"
+            )
+
+        qhat = device_qhat[key]
+
+    return float(qhat)
+
+
+def explain_ambiguous_transaction(
+    probabilities,
+    mode,
+    amount_segment,
+    device
+):
+
+    class_details = []
+
+    class_names = {
+        0: "Non-Fraud",
+        1: "Fraud"
+    }
+
+    for class_id in [0, 1]:
+
+        probability = float(probabilities[class_id])
+
+        qhat = get_calibration_threshold(
+            mode,
+            amount_segment,
+            device,
+            class_id
+        )
+
+        threshold = 1 - qhat
+
+        included = probability >= threshold
+
+        margin = probability - threshold
+
+        class_details.append({
+
+            "Class": class_names[class_id],
+
+            "Probability (%)":
+                round(probability * 100, 2),
+
+            "Required Threshold (%)":
+                round(threshold * 100, 2),
+
+            "Threshold Difference (%)":
+                round(margin * 100, 2),
+
+            "Included in Prediction Set":
+                "Yes" if included else "No"
+
+        })
+
+    included_classes = [
+        item["Class"]
+        for item in class_details
+        if item["Included in Prediction Set"] == "Yes"
+    ]
+
+    if len(included_classes) == 2:
+
+        explanation = (
+            "Both Fraud and Non-Fraud satisfy their respective "
+            "conformal inclusion thresholds. Therefore, the system "
+            "cannot exclude either class and routes this transaction "
+            "for analyst review."
+        )
+
+    elif len(included_classes) == 0:
+
+        explanation = (
+            "Neither class satisfies its conformal inclusion threshold. "
+            "The prediction set is empty, so the transaction requires "
+            "manual investigation."
+        )
+
+    else:
+
+        explanation = (
+            f"Only {included_classes[0]} satisfies its conformal "
+            "inclusion threshold."
+        )
+
+    return {
+        "details": class_details,
+        "included_classes": included_classes,
+        "explanation": explanation
+    }
+
+
+def generate_investigation_recommendations(row, probability):
+
+    recommendations = []
+
+    amount = row.get("TransactionAmt", None)
+    device = row.get("DeviceType", "Unknown")
+    product = row.get("ProductCD", "Unknown")
+
+    # 1. Transaction amount analysis
+    if pd.notna(amount):
+
+        if amount > amount_config["q2"]:
+
+            recommendations.append(
+                "HIGH AMOUNT: Examine whether this transaction "
+                "amount is consistent with the customer's "
+                "usual spending pattern."
+            )
+
+        elif amount <= amount_config["q1"]:
+
+            recommendations.append(
+                "LOW AMOUNT: Check whether this transaction "
+                "is part of repeated small transactions "
+                "or an unusual purchase pattern."
+            )
+
+        else:
+
+            recommendations.append(
+                "AMOUNT REVIEW: Compare this transaction "
+                "with previous transactions to identify "
+                "unusual spending behaviour."
+            )
+
+    # 2. Device analysis
+    if pd.isna(device) or str(device).lower() == "unknown":
+
+        recommendations.append(
+            "UNKNOWN DEVICE: Verify the available device "
+            "and identity information before approving "
+            "the transaction."
+        )
+
+    elif str(device).lower() == "mobile":
+
+        recommendations.append(
+            "MOBILE DEVICE: Examine available device and "
+            "transaction consistency information."
+        )
+
+    else:
+
+        recommendations.append(
+            "DESKTOP DEVICE: Verify that the transaction "
+            "is consistent with the customer's known "
+            "device activity."
+        )
+
+    # 3. Product analysis
+    if pd.notna(product):
+
+        recommendations.append(
+            f"PRODUCT REVIEW: Examine transaction details "
+            f"associated with product category {product}."
+        )
+
+    # 4. Fraud probability analysis
+    if probability >= 0.70:
+
+        recommendations.append(
+            "ELEVATED FRAUD SCORE: Prioritize verification "
+            "of the transaction and available supporting evidence."
+        )
+
+    else:
+
+        recommendations.append(
+            "UNCERTAIN FRAUD SCORE: Avoid making a decision "
+            "based on probability alone. Review both possible "
+            "classes and supporting transaction information."
+        )
+
+    return recommendations
+
 def get_amount_segment(amount):
 
     if amount <= amount_config["q1"]:
@@ -162,6 +362,7 @@ def preprocess_data(raw_df):
     return X
 
 
+
 def get_prediction_set(
     probabilities,
     mode,
@@ -173,30 +374,16 @@ def get_prediction_set(
 
     for c in [0, 1]:
 
-        if mode == "Class-Conditional":
+        qhat = get_calibration_threshold(
+            mode,
+            amount_segment,
+            device,
+            c
+        )
 
-            qhat = qhat_class[c]
+        threshold = 1 - qhat
 
-        elif mode == "Amount Segment":
-
-            qhat = amount_qhat[
-                (amount_segment, c)
-            ]
-
-        else:
-
-            if device not in [
-                "Unknown",
-                "desktop",
-                "mobile"
-            ]:
-                device = "Unknown"
-
-            qhat = device_qhat[
-                (device, c)
-            ]
-
-        if probabilities[c] >= (1 - qhat):
+        if probabilities[c] >= threshold:
 
             if c == 0:
                 prediction_set.append("Non-Fraud")
@@ -289,6 +476,7 @@ def analyze_transactions(raw_df, mode):
                 "Amount Segment": amount_segment,
                 "Device Type": device,
                 "Fraud Probability": fraud_probability,
+                "Non-Fraud Probability": float(probabilities[i, 0]),
                 "Prediction Set": prediction_set,
                 "Decision": decision,
                 "Actual Label": actual_label
@@ -417,6 +605,73 @@ if input_mode == "Demo Transactions":
     selected_df = demo_df.iloc[
         [selected]
     ].copy()
+    
+    if st.button("🔍 Find Ambiguous Demo Transactions"):
+
+        with st.spinner("Checking demo transactions..."):
+
+            all_results = analyze_transactions(
+                demo_df,
+                mode
+            )
+
+            ambiguous_rows = []
+
+            for result in all_results:
+
+                if len(result["Prediction Set"]) == 2:
+
+                    ambiguous_rows.append({
+
+                        "Transaction ID":
+                            result["Transaction ID"],
+
+                        "Amount":
+                            result["Amount"],
+
+                        "Device":
+                            result["Device Type"],
+
+                        "Fraud Probability (%)":
+                            round(
+                                result["Fraud Probability"] * 100,
+                                2
+                            ),
+
+                        "Prediction Set":
+                            "{Non-Fraud, Fraud}",
+
+                        "Decision":
+                            result["Decision"]
+
+                    })
+
+            if ambiguous_rows:
+
+                st.success(
+                    f"Found {len(ambiguous_rows)} ambiguous transactions!"
+                )
+
+                st.dataframe(
+                    pd.DataFrame(ambiguous_rows),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.info(
+                    "Select any Transaction ID from this table "
+                    "in the Demo Transaction dropdown and click "
+                    "Analyze Transaction."
+                )
+
+            else:
+
+                st.warning(
+                    "No ambiguous transactions found in this demo "
+                    "dataset for the selected calibration mode. "
+                    "Try another calibration mode."
+                )
+
 
     selected_row = selected_df.iloc[0]
 
@@ -614,6 +869,84 @@ if input_mode == "Demo Transactions":
                 "Actual class is not contained in the "
                 "prediction set (miscoverage case)."
             )
+            
+        # =========================================================
+        # AMBIGUOUS TRANSACTION EXPLANATION
+        # =========================================================
+
+        if len(prediction_set) == 2:
+
+            st.divider()
+
+            st.markdown(
+                "## 🧠 Why Does This Transaction Need Review?"
+            )
+
+            explanation = explain_ambiguous_transaction(
+                [
+                    result["Non-Fraud Probability"],
+                    result["Fraud Probability"]
+                ],
+                mode,
+                result["Amount Segment"],
+                result["Device Type"]
+            )
+
+    # Display both class probabilities
+            e1, e2 = st.columns(2)
+
+            e1.metric(
+                "Non-Fraud Probability",
+                f"{result['Non-Fraud Probability'] * 100:.2f}%"
+            )
+
+            e2.metric(
+                "Fraud Probability",
+                f"{result['Fraud Probability'] * 100:.2f}%"
+            )
+
+            st.markdown("### Conformal Threshold Analysis")
+
+            explanation_df = pd.DataFrame(
+                explanation["details"]
+            )
+
+            st.dataframe(
+                explanation_df,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.warning(
+                "⚠️ Both classes are included in the prediction set."
+            )
+
+            st.markdown("### Explanation for Financial Analyst")
+
+            st.info(explanation["explanation"])
+
+            
+            st.markdown("### Transaction-Specific Investigation Recommendations")
+
+            recommendations = generate_investigation_recommendations(
+                selected_row,
+                result["Fraud Probability"]
+            )
+
+            for i, recommendation in enumerate(recommendations, 1):
+
+                st.markdown(f"**{i}.** {recommendation}")
+
+
+                st.caption(
+                    "CoverFlow provides decision support. The final determination "
+                    "must be made by an authorized human analyst."
+                    )
+
+            
+        
+
+        
 
 
 # =========================================================
